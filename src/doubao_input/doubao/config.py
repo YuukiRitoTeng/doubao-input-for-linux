@@ -74,6 +74,12 @@ def get_keyboard_config_path() -> Path:
 STOP_SAFETY_TIMEOUT = 1.0  # seconds
 DEBOUNCE_INTERVAL = 0.3  # seconds
 PASTE_DELAY = 0.05  # seconds between copy and paste simulation
+# xdotool type 逐字符输入时每字符的间隔 (毫秒). CJK 字符靠 xdotool 临时
+# 重绑 keysym, 每字符触发一次 MappingNotify; 间隔太小 (1ms) 接收端 (终端
+# PTY / Electron) 来不及处理会丢字. 12ms 是 xdotool 默认值, 也是 zhipu-asr
+# 实测可用的下限 — 不要调到 12 以下, 否则 VSCode/终端又会丢字. 仅用于 TUI
+# (vim/less/tmux/...): 普通 shell 和编辑器走剪贴板原子粘贴, 不经过这里.
+XDOTOOL_TYPE_DELAY_MS = 12
 AUTH_EXPIRY_DELAY = 2.0  # seconds before resetting after auth error
 
 # --- Overlay UI ---

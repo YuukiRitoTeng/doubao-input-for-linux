@@ -33,6 +33,7 @@ import threading
 import time
 from typing import Optional
 
+from doubao_input.doubao.config import XDOTOOL_TYPE_DELAY_MS
 from doubao_input.doubao.host_tools import command_candidates
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,19 @@ _TERMINAL_INDICATORS = (
 # 而窗口标题里含下列关键词.
 _TERMINAL_IN_TITLE = (
     "terminal", "bash", "zsh", "powershell", "cmd", "python", "fish",
+)
+# TUI 应用 (运行在终端里、会拦截 Ctrl+Shift+V 的 bracketed-paste):
+# 标题命中即只能走 xdotool type 逐字符. 普通交互式 shell 不算 TUI.
+_TUI_INDICATORS = (
+    "vim", "nvim", "neovim", "less", "more", "man:", "man ",
+    "tmux", "screen", "claude", "nano", "micro",
+    "htop", "btop", "top", "lazygit", "tig", "ranger", "yazi",
+)
+# Shell 进程名. 出现在窗口标题里说明当前是交互式 shell (fish/bash/zsh 都
+# 会把进程名写进标题), 而非 TUI 或编辑器. 用来区分 VSCode 编辑器 vs
+# VSCode 集成终端 — 两者 WM_CLASS 都是 code, 只能靠标题分.
+_SHELL_NAMES = (
+    "fish", "bash", "zsh", "tcsh", "csh", "pwsh", "powershell",
 )
 
 
@@ -145,20 +159,48 @@ class Injector:
     def _classify_window(self, window_id: int) -> str:
         """返回 'type' | 'paste_shift' | 'paste'.
 
-        - 'type': WM_CLASS 含 'code' 或属于终端类 -> 用 xdotool type
-          逐字符 (避开 Ctrl+V / Ctrl+Shift+V 被拦截).
-        - 'paste_shift': 不该到这分支了 (终端走 type), 保留以备 type 失败.
-        - 'paste': 普通应用, 剪贴板 + Ctrl+V.
+        原则: 能用剪贴板原子粘贴 (Ctrl+V / Ctrl+Shift+V) 就用, 不丢字
+        且瞬间完成; 只有 TUI (vim/less/tmux/claude-code) 会拦截粘贴事件,
+        才退化到 xdotool type 逐字符 (慢, 但能进).
+
+        - 'paste':        普通应用 (浏览器/VSCode 编辑器), 剪贴板 + Ctrl+V.
+        - 'paste_shift':  终端 (gnome-terminal/...里的 fish/bash, 以及
+                          VSCode 集成终端), 剪贴板 + Ctrl+Shift+V. 终端的
+                          粘贴键是 Ctrl+Shift+V, 同样是原子操作, 比逐字符
+                          type 既快又不丢字.
+        - 'type':         TUI 应用 (vim/less/tmux/...), 逐字符 xdotool type.
         """
         name, cls = self._get_window_info(window_id)
+        name_l = (name or "").lower()
+        cls_l = (cls or "").lower()
         is_term = _is_terminal_window(name, cls)
-        cls_lower = (cls or "").lower()
-        logger.debug(
-            "_classify_window: id=%s name=%r class=%r is_term=%s",
-            window_id, name, cls, is_term,
+        # 词边界匹配, 避免编辑 .bashrc / selfish.py 之类误命中 shell 名.
+        is_tui = any(
+            re.search(r"\b" + re.escape(t) + r"\b", name_l)
+            for t in _TUI_INDICATORS
         )
-        if is_term or "code" in cls_lower:
-            return "type"
+        is_shell = any(
+            re.search(r"\b" + re.escape(s) + r"\b", name_l)
+            for s in _SHELL_NAMES
+        )
+        logger.debug(
+            "_classify_window: id=%s name=%r class=%r "
+            "is_term=%s is_tui=%s is_shell=%s",
+            window_id, name, cls, is_term, is_tui, is_shell,
+        )
+        # VSCode: 编辑器 Ctrl+V, 集成终端 Ctrl+Shift+V, TUI 逐字符.
+        # 三者 WM_CLASS 都是 code, 靠窗口标题里的 shell/TUI 名字区分.
+        if "code" in cls_l or "code" in name_l:
+            if is_tui:
+                return "type"
+            if is_shell:
+                return "paste_shift"
+            return "paste"
+        # 外部终端: TUI 拦截粘贴 -> type; 普通 shell -> Ctrl+Shift+V.
+        if is_term:
+            if is_tui:
+                return "type"
+            return "paste_shift"
         return "paste"
 
     def _get_window_info(self, window_id: int):
@@ -215,11 +257,17 @@ class Injector:
                 check=False, timeout=1.5,
             )
             # --clearmodifiers: xdotool 自动 keyup 当前按下的修饰符;
-            # --delay 1: 每个字符之间间隔 1ms (默认 12ms 对长文本太慢);
+            # --delay: 每字符间隔. 12ms 是 xdotool 默认值, 也是 zhipu-asr
+            #   实测可用的下限; 调小会丢字 (CJK 靠 keysym 重绑, 每字触发
+            #   MappingNotify, 接收端来不及处理). 见 config.XDOTOOL_TYPE_DELAY_MS.
+            # 不带 --window: 前面已 windowfocus 切好焦点, 让 xdotool type
+            #   走 XTest 全局注入 (等同真实键盘, 不可被拒). 带 --window 会
+            #   改走 XSendEvent 合成事件, Electron (VSCode) 默认拒绝合成
+            #   键盘事件会丢字. 与 zhipu-asr 对齐.
             # `--` 结束选项解析, 防止 text 以 - 开头被当成 flag.
             cmd = [
-                "xdotool", "type", "--window", str(window_id),
-                "--clearmodifiers", "--delay", "1", "--", text,
+                "xdotool", "type", "--clearmodifiers",
+                "--delay", str(XDOTOOL_TYPE_DELAY_MS), "--", text,
             ]
             r = subprocess.run(cmd, check=False, timeout=15)
             ok = r.returncode == 0
