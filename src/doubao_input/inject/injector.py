@@ -59,13 +59,6 @@ _TERMINAL_INDICATORS = (
 _TERMINAL_IN_TITLE = (
     "terminal", "bash", "zsh", "powershell", "cmd", "python", "fish",
 )
-# TUI 应用 (运行在终端里、会拦截 Ctrl+Shift+V 的 bracketed-paste):
-# 标题命中即只能走 xdotool type 逐字符. 普通交互式 shell 不算 TUI.
-_TUI_INDICATORS = (
-    "vim", "nvim", "neovim", "less", "more", "man:", "man ",
-    "tmux", "screen", "claude", "nano", "micro",
-    "htop", "btop", "top", "lazygit", "tig", "ranger", "yazi",
-)
 
 
 def _is_terminal_window(window_name: str, window_class: str) -> bool:
@@ -151,46 +144,23 @@ class Injector:
     # ---- window classification ----
 
     def _classify_window(self, window_id: int) -> str:
-        """返回 'type' | 'paste_shift' | 'paste'.
+        """返回 'type' | 'paste'. 与 zhipu-asr 对齐.
 
-        原则: 能用剪贴板原子粘贴 (Ctrl+V / Ctrl+Shift+V) 就用, 不丢字
-        且瞬间完成; 只在没法原子粘贴时才退化到 xdotool type 逐字符.
-
-        - 'paste':        普通应用 (浏览器/编辑器), 剪贴板 + Ctrl+V.
-        - 'paste_shift':  外部终端 (gnome-terminal/alacritty/...里的
-                          fish/bash), 剪贴板 + Ctrl+Shift+V. 终端粘贴键是
-                          Ctrl+Shift+V, 原子操作, 比逐字符 type 快且不丢字.
-        - 'type':         VSCode (任何窗口) + TUI (vim/less/tmux/...),
-                          逐字符 xdotool type.
-
-        为什么 VSCode 不能用剪贴板粘贴: 编辑器要 Ctrl+V, 集成终端要
-        Ctrl+Shift+V, 但两者 WM_CLASS 都是 code, 顶层窗口标题又只反映编辑
-        器标签页 (聚焦终端时标题不变), 无法可靠区分. 选错就把 Ctrl+V 送进
-        终端 (bash 当 quoted-insert) 或把 Ctrl+Shift+V 送进编辑器 (触发
-        markdown 预览). 只能一律逐字符 type — 与 zhipu-asr 一致, 已验证.
+        - 'type':  终端 + VSCode (编辑器或集成终端) -> xdotool type 逐字符.
+                   终端 Ctrl+V 不是粘贴; VSCode 编辑器/终端无法靠 WM_CLASS
+                   或标题区分, 一律逐字符最稳 (zhipu-asr 实测可用).
+        - 'paste': 其它应用 (浏览器/编辑器) -> 剪贴板 + Ctrl+V, 原子粘贴.
         """
         name, cls = self._get_window_info(window_id)
-        name_l = (name or "").lower()
         cls_l = (cls or "").lower()
+        name_l = (name or "").lower()
         is_term = _is_terminal_window(name, cls)
-        # 词边界匹配, 避免编辑 less.py / top.go 之类误命中 TUI 名.
-        is_tui = any(
-            re.search(r"\b" + re.escape(t) + r"\b", name_l)
-            for t in _TUI_INDICATORS
-        )
         logger.debug(
-            "_classify_window: id=%s name=%r class=%r is_term=%s is_tui=%s",
-            window_id, name, cls, is_term, is_tui,
+            "_classify_window: id=%s name=%r class=%r is_term=%s",
+            window_id, name, cls, is_term,
         )
-        # VSCode: 编辑器/集成终端无法靠 WM_CLASS 或标题区分 (见上), 一律
-        # 走逐字符 type, 避免选错粘贴键.
-        if "code" in cls_l or "code" in name_l:
+        if is_term or "code" in cls_l or "code" in name_l:
             return "type"
-        # 外部终端: TUI 拦截粘贴 -> type; 普通 shell -> Ctrl+Shift+V.
-        if is_term:
-            if is_tui:
-                return "type"
-            return "paste_shift"
         return "paste"
 
     def _get_window_info(self, window_id: int):
