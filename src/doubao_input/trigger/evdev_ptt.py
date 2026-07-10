@@ -54,6 +54,7 @@ class EvdevPtt:
         self._paths: list[str] = []
         self._rescan_interval = 1.0
         self._last_rescan = 0.0
+        self._need_rescan = False
 
     # ---- public ----
 
@@ -136,6 +137,18 @@ class EvdevPtt:
         self._fds = []
         self._paths = []
 
+    def _drop_fd(self, fd: int) -> None:
+        """关闭并移除单个失效 fd，并标记需要 rescan 以便重新拾起拔插后的设备。"""
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if fd in self._fds:
+            idx = self._fds.index(fd)
+            self._fds.pop(idx)
+            self._paths.pop(idx)
+        self._need_rescan = True
+
     def _run(self) -> None:
         from gi.repository import GLib  # type: ignore
 
@@ -146,11 +159,14 @@ class EvdevPtt:
                 now = time.monotonic()
                 if now - self._last_rescan > self._rescan_interval:
                     self._last_rescan = now
-                    if not self._fds:
+                    # 无 fd 或刚丢过失效 fd：重扫以拾起拔插后的新设备。
+                    if not self._fds or self._need_rescan:
+                        self._need_rescan = False
                         if not self._scan():
-                            self._notify_error("无可访问的 /dev/input/event* 设备")
-                            time.sleep(2.0)
-                            continue
+                            if not self._fds:
+                                self._notify_error("无可访问的 /dev/input/event* 设备")
+                                time.sleep(2.0)
+                                continue
 
                 if not self._fds:
                     time.sleep(0.2)
@@ -166,6 +182,14 @@ class EvdevPtt:
                     try:
                         data = os.read(fd, _EVENT_SIZE * 16)
                     except OSError:
+                        # fd 已失效（设备拔出/重排）。若只 continue 而不移除，
+                        # select 会立即再次返回该 fd 就绪 -> read 报错 -> 死循环，
+                        # 吃满一个核。这里关闭并移除，交给下面的 rescan 重开。
+                        self._drop_fd(fd)
+                        continue
+                    if not data:
+                        # EOF：设备已断开，同样移除。
+                        self._drop_fd(fd)
                         continue
                     buf = data
                     self._dispatch(buf, GLib.idle_add)
