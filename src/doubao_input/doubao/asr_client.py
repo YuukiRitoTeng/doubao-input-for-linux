@@ -139,11 +139,33 @@ class ASRClient:
                 self._pending_audio.append(data)
 
     def finish_sending(self) -> None:
-        """Signal no more audio; keep WS open for final results."""
+        """Signal end of audio by closing the WebSocket.
+
+        Doubao's streaming ASR only emits the trailing final result once it
+        knows the audio stream has ended. Upstream's finish_sending() merely
+        cleared the buffer and left the WS open "for final results" - but the
+        server, never told the stream had ended, kept waiting for more audio
+        and never sent finish. Every short clip then stalled until the 1s
+        safety timeout with empty/partial text.
+
+        Closing the socket is the conventional end-of-stream signal: the
+        server typically flushes its decoder and returns the final result
+        (and a finish event) before the close handshake completes. The
+        receive loop still drains in-flight messages, and because we set
+        _connected=False first, the subsequent ConnectionClosed is treated as
+        a clean close, not on_error.
+        """
         with self._lock:
             self._pending_audio.clear()
             self._connected = False
-        logger.info("Finished sending audio, waiting for server response")
+        ws = self._ws
+        loop = self._loop
+        if ws is not None and loop is not None and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(1000), loop)
+            except Exception as e:
+                logger.warning("Failed to close WS after finish: %s", e)
+        logger.info("Finished sending audio, closing WS to flush final results")
 
     def disconnect(self) -> None:
         """Close the WebSocket."""
