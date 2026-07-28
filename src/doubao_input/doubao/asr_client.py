@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from doubao_input.doubao.config import (
-    AUTH_ERROR_CODE,
+    AUTH_ERROR_CODES,
     AUTH_ERROR_KEYWORDS,
     FIXED_QUERY_PARAMS,
     ORIGIN,
@@ -208,7 +208,7 @@ class ASRClient:
         # Detect auth errors
         if code != 0:
             lower_msg = msg.lower()
-            if code == AUTH_ERROR_CODE or any(
+            if code in AUTH_ERROR_CODES or any(
                 kw in lower_msg for kw in AUTH_ERROR_KEYWORDS
             ):
                 logger.warning(

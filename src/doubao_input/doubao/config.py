@@ -37,9 +37,13 @@ AUDIO_BLOCKSIZE = 4096  # samples per callback (~256ms at 16kHz)
 
 # --- Auth error detection ---
 
-AUTH_ERROR_CODE = 709599054
+# 709599054: session/cookie invalid.
+# 710022013: "tourist reach limited" - server treats the cached cookie as a
+# logged-out tourist (expired session) and refuses to transcribe.
+AUTH_ERROR_CODES = {709599054, 710022013}
 AUTH_ERROR_KEYWORDS = [
     "cookie", "auth", "login", "session", "unauthorized", "expired",
+    "tourist",
 ]
 
 # --- Paths ---
